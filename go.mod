@@ -1,3 +1,3 @@
-module aesc-server-client
+module aesc-client
 
 go 1.25.1
