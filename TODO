@@ -1,1 +1,2 @@
 1. change name<TAB>value to Netscape cookies in login.go
+2. Parse html in http://server.internat.msu.ru/cs/motd. Cut a list of contests.
