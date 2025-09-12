@@ -1,4 +1,4 @@
-package test
+package main
 
 import (
 	"fmt"
@@ -53,15 +53,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	for i := range len(contests) {
+	for i := range contests {
 		fmt.Printf("%d. %s -> %s\n", i+1, contests[i].Name, contests[i].URL)
 	}
+
 	resp1, err := client.Get("http://server.aesc.msu.ru" + contests[0].URL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "GET %s failed: %v\n", contests[0].URL, err)
 		os.Exit(2)
 	}
-
 	defer resp1.Body.Close()
 
 	tasks, err := parse.ParseProblems(resp1.Body)
@@ -71,11 +71,18 @@ func main() {
 	}
 
 	if len(tasks) == 0 {
-		fmt.Fprintln(os.Stderr, "no contests found")
+		fmt.Fprintln(os.Stderr, "no tasks found")
 		os.Exit(1)
 	}
 
-	for i := range len(tasks) {
+	for i := range tasks {
 		fmt.Printf("%s -> %s\n", tasks[i].Name, tasks[i].URL)
 	}
+
+	err = parse.FetchStatement(client, "http://server.aesc.msu.ru", tasks[0].URL, home + "/aesc-statement")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "FetchStatement failed: %v\n", err)
+		os.Exit(2)
+	}
 }
+
