@@ -37,7 +37,7 @@ func main() {
 
 	resp, err := client.Get("http://server.aesc.msu.ru/cs/motd")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "GET /cs failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "GET /cs/motd failed: %v\n", err)
 		os.Exit(2)
 	}
 	defer resp.Body.Close()
@@ -55,5 +55,27 @@ func main() {
 
 	for i := range len(contests) {
 		fmt.Printf("%d. %s -> %s\n", i+1, contests[i].Name, contests[i].URL)
+	}
+	resp1, err := client.Get("http://server.aesc.msu.ru" + contests[0].URL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "GET %s failed: %v\n", contests[0].URL, err)
+		os.Exit(2)
+	}
+
+	defer resp1.Body.Close()
+
+	tasks, err := parse.ParseProblems(resp1.Body)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ParseTasks failed: %v\n", err)
+		os.Exit(2)
+	}
+
+	if len(tasks) == 0 {
+		fmt.Fprintln(os.Stderr, "no contests found")
+		os.Exit(1)
+	}
+
+	for i := range len(tasks) {
+		fmt.Printf("%s -> %s\n", tasks[i].Name, tasks[i].URL)
 	}
 }
