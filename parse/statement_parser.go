@@ -6,16 +6,13 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path"
-	"path/filepath"
 	"regexp"
 	"strings"
 
 	"golang.org/x/net/html"
 )
 
-const MaxLineWidth = 170
+const MaxLineWidth = 180
 
 func FetchStatementToString(client *http.Client, problemURL string) (string, error) {
 	if client == nil {
@@ -33,9 +30,8 @@ func FetchStatementToString(client *http.Client, problemURL string) (string, err
 	if err != nil {
 		return "", fmt.Errorf("parse %s: %w", problemURL, err)
 	}
-	iframeSrc, ok := findIframeSrc(root)
+	iframeSrc, ok := findIframeSrcPrefer(root)
 	var contentRoot *html.Node
-	var baseForResolve string
 	if ok {
 		iframeURL := resolveRelativeURL(problemURL, iframeSrc)
 		resp2, err := client.Get(iframeURL)
@@ -51,13 +47,11 @@ func FetchStatementToString(client *http.Client, problemURL string) (string, err
 			return "", fmt.Errorf("parse %s: %w", iframeURL, err)
 		}
 		contentRoot = root2
-		baseForResolve = iframeURL
 	} else {
 		contentRoot = root
-		baseForResolve = problemURL
 	}
 	var buf bytes.Buffer
-	if err := extractTextWithFormulas(client, contentRoot, baseForResolve, "", &buf); err != nil {
+	if err := extractTextWithFormulas(contentRoot, &buf); err != nil {
 		return "", fmt.Errorf("extract text: %w", err)
 	}
 	cleaned := cleanExtracted(buf.String())
@@ -65,27 +59,60 @@ func FetchStatementToString(client *http.Client, problemURL string) (string, err
 	return out, nil
 }
 
-func findIframeSrc(n *html.Node) (string, bool) {
+func findIframeSrcPrefer(n *html.Node) (string, bool) {
 	if n == nil {
 		return "", false
 	}
-	if n.Type == html.ElementNode && strings.EqualFold(n.Data, "iframe") {
-		for _, a := range n.Attr {
-			if strings.EqualFold(a.Key, "src") && strings.TrimSpace(a.Val) != "" {
-				return a.Val, true
+	idRe := regexp.MustCompile(`(?i)^aid\d+pid\d+$`)
+	var candidate string
+	var found bool
+	var f func(*html.Node)
+	f = func(x *html.Node) {
+		if x == nil || found {
+			return
+		}
+		if x.Type == html.ElementNode && strings.EqualFold(x.Data, "iframe") {
+			var id, src string
+			for _, a := range x.Attr {
+				k := strings.ToLower(a.Key)
+				switch (k) {
+					case "id":
+						id = a.Val
+					case "src":
+						src = a.Val
+				}
+			}
+			if src == "" {
+				// skip
+			} else if idRe.MatchString(id) {
+				candidate = src
+				found = true
+				return
+			} else if strings.Contains(src, "text-pack") {
+				if candidate == "" {
+					candidate = src
+				}
+			} else if candidate == "" {
+				candidate = src
 			}
 		}
-	}
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if src, ok := findIframeSrc(c); ok {
-			return src, true
+		for c := x.FirstChild; c != nil; c = c.NextSibling {
+			if found {
+				return
+			}
+			f(c)
 		}
 	}
-	return "", false
+	f(n)
+	if candidate == "" {
+		return "", false
+	}
+	return candidate, true
 }
 
 func resolveRelativeURL(base, href string) string {
-	u, err := url.Parse(strings.TrimSpace(href))
+	href = strings.TrimSpace(href)
+	u, err := url.Parse(href)
 	if err == nil && u.IsAbs() {
 		return href
 	}
@@ -100,19 +127,18 @@ func resolveRelativeURL(base, href string) string {
 	return baseu.ResolveReference(ref).String()
 }
 
-func extractTextWithFormulas(client *http.Client, root *html.Node, baseForResolve, imagesDir string, w io.Writer) error {
+func extractTextWithFormulas(root *html.Node, w io.Writer) error {
 	if root == nil {
 		return nil
 	}
 	wsRe := regexp.MustCompile(`\s+`)
-	imageCounter := 0
-	appendText := func(s string) {
+	appendInline := func(s string) {
 		s = strings.TrimSpace(s)
 		if s == "" {
 			return
 		}
 		s = wsRe.ReplaceAllString(s, " ")
-		io.WriteString(w, s+"\n")
+		io.WriteString(w, s+" ")
 	}
 	var walker func(*html.Node) error
 	walker = func(n *html.Node) error {
@@ -120,7 +146,7 @@ func extractTextWithFormulas(client *http.Client, root *html.Node, baseForResolv
 			return nil
 		}
 		if n.Type == html.TextNode {
-			appendText(n.Data)
+			appendInline(n.Data)
 			return nil
 		}
 		if n.Type == html.ElementNode {
@@ -131,7 +157,7 @@ func extractTextWithFormulas(client *http.Client, root *html.Node, baseForResolv
 						return err
 					}
 				}
-				io.WriteString(w, "\n")
+				io.WriteString(w, "\n\n")
 				return nil
 			case "br":
 				io.WriteString(w, "\n")
@@ -148,34 +174,16 @@ func extractTextWithFormulas(client *http.Client, root *html.Node, baseForResolv
 				}
 				return nil
 			case "img":
-				var src, alt string
+				var alt string
 				for _, a := range n.Attr {
-					if strings.EqualFold(a.Key, "src") {
-						src = a.Val
-					}
 					if strings.EqualFold(a.Key, "alt") {
 						alt = a.Val
 					}
 				}
-				if src != "" {
-					imageCounter++
-					resolved := resolveRelativeURL(baseForResolve, src)
-					ext := path.Ext(resolved)
-					if ext == "" {
-						ext = ".png"
-					}
-					name := fmt.Sprintf("formula_%03d%s", imageCounter, ext)
-					savePath := name
-					if imagesDir != "" {
-						if err := os.MkdirAll(imagesDir, 0o755); err == nil {
-							savePath = filepath.Join(imagesDir, name)
-						}
-					}
-					_ = downloadToFile(client, resolved, savePath)
-					io.WriteString(w, fmt.Sprintf("[IMAGE: %s]\n", savePath))
-					if alt != "" {
-						io.WriteString(w, fmt.Sprintf("Alt: %s\n", strings.TrimSpace(alt)))
-					}
+				if alt != "" {
+					appendInline(alt)
+				} else {
+					appendInline("[IMAGE]")
 				}
 				return nil
 			case "script":
@@ -188,13 +196,11 @@ func extractTextWithFormulas(client *http.Client, root *html.Node, baseForResolv
 				}
 				if strings.Contains(strings.ToLower(typ), "math") {
 					raw := extractAllText(n)
-					clean, display := normalizeTeX(raw)
+					clean, _ := normalizeTeX(raw)
 					if clean != "" {
-						if display {
-							io.WriteString(w, fmt.Sprintf("$$%s$$\n", clean))
-						} else {
-							io.WriteString(w, fmt.Sprintf("$%s$\n", clean))
-						}
+						clean = simplifyPowers(clean)
+						clean = inlineTexToPlain(clean)
+						appendInline(clean)
 					}
 					return nil
 				}
@@ -210,56 +216,10 @@ func extractTextWithFormulas(client *http.Client, root *html.Node, baseForResolv
 	return walker(root)
 }
 
-func downloadToFile(client *http.Client, srcURL, dest string) error {
-	if client == nil {
-		return fmt.Errorf("nil client")
-	}
-	resp, err := client.Get(srcURL)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("GET %s returned %s", srcURL, resp.Status)
-	}
-	destDir := filepath.Dir(dest)
-	if destDir != "" && destDir != "." {
-		if err := os.MkdirAll(destDir, 0o755); err != nil {
-			return fmt.Errorf("mkdir %s: %w", destDir, err)
-		}
-	}
-	f, err := os.Create(dest)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = io.Copy(f, resp.Body)
-	return err
-}
-
-func normalizeTeX(s string) (string, bool) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return "", false
-	}
-	if strings.HasPrefix(s, "$$") && strings.HasSuffix(s, "$$") && len(s) > 4 {
-		return strings.TrimSpace(s[2 : len(s)-2]), true
-	}
-	if strings.HasPrefix(s, `\[` ) && strings.HasSuffix(s, `\]`) && len(s) > 4 {
-		return strings.TrimSpace(s[2 : len(s)-2]), true
-	}
-	if strings.HasPrefix(s, `\(`) && strings.HasSuffix(s, `\)`) && len(s) > 4 {
-		return strings.TrimSpace(s[2 : len(s)-2]), false
-	}
-	if strings.HasPrefix(s, "$") && strings.HasSuffix(s, "$") && len(s) > 2 {
-		return strings.TrimSpace(s[1 : len(s)-1]), false
-	}
-	reTrim := regexp.MustCompile(`^\s*(?:<!--.*?-->\s*)*(.*?)(?:\s*<!--.*?-->\s*)*\s*$`)
-	out := reTrim.ReplaceAllString(s, "$1")
-	return strings.TrimSpace(out), false
-}
-
 func extractAllText(n *html.Node) string {
+	if n == nil {
+		return ""
+	}
 	var b strings.Builder
 	var f func(*html.Node)
 	f = func(x *html.Node) {
@@ -274,35 +234,97 @@ func extractAllText(n *html.Node) string {
 		}
 	}
 	f(n)
-	return strings.TrimSpace(b.String())
+	return b.String()
+}
+
+func normalizeTeX(s string) (string, bool) {
+	if s == "" {
+		return "", false
+	}
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "$$") && strings.HasSuffix(s, "$$") {
+		return strings.TrimSpace(s[2 : len(s)-2]), true
+	}
+	if strings.HasPrefix(s, "$") && strings.HasSuffix(s, "$") {
+		return strings.TrimSpace(s[1 : len(s)-1]), false
+	}
+	if strings.HasPrefix(s, `\(`) && strings.HasSuffix(s, `\)`) {
+		return strings.TrimSpace(s[2 : len(s)-2]), false
+	}
+	if strings.HasPrefix(s, `\[` ) && strings.HasSuffix(s, `\]`) {
+		return strings.TrimSpace(s[2 : len(s)-2]), true
+	}
+	reTrim := regexp.MustCompile(`^\s*(?:<!--.*?-->\s*)*(.*?)(?:\s*<!--.*?-->\s*)*\s*$`)
+	out := reTrim.ReplaceAllString(s, "$1")
+	return strings.TrimSpace(out), false
+}
+
+func simplifyPowers(tex string) string {
+	reCurly := regexp.MustCompile(`\^\{([0-9]+)\}`)
+	tex = reCurly.ReplaceAllString(tex, "^$1")
+	return tex
+}
+
+func inlineTexToPlain(tex string) string {
+	tex = strings.ReplaceAll(tex, `\cdot`, "*")
+	tex = strings.ReplaceAll(tex, `\times`, "x")
+	tex = strings.ReplaceAll(tex, `\le`, "<=")
+	tex = strings.ReplaceAll(tex, `\ge`, ">=")
+	tex = strings.ReplaceAll(tex, `\ldots`, "...")
+	tex = strings.ReplaceAll(tex, `\;`, " ")
+	return tex
 }
 
 func cleanExtracted(s string) string {
+	if s == "" {
+		return ""
+	}
+	reBigComment := regexp.MustCompile(`(?is)<!--\s*/\*\s*Font Definitions\b.*?-->`)
+	s = reBigComment.ReplaceAllString(s, "")
+	reMso := regexp.MustCompile(`(?is)<!--.*?mso.*?-->`)
+	s = reMso.ReplaceAllString(s, "")
 	reComment := regexp.MustCompile(`(?s)<!--.*?-->`)
 	s = reComment.ReplaceAllString(s, "")
 	lines := strings.Split(s, "\n")
 	var out []string
-	reTrashLine := regexp.MustCompile(`(?i)^\s*(none|html|<[^>]+>|\s*/\*.*|\*.*\*/).*$`)
-	for _, ln := range lines {
-		trim := strings.TrimSpace(ln)
-		if trim == "" {
+	reTrashLine := regexp.MustCompile(`(?i)^\s*(none|html|<[^>]+>|\s*/\*.*|\*.*\*/|@page|font-family|Font Definitions|\{|\}).*`)
+	for i := range len(lines) {
+		ln := strings.TrimSpace(lines[i])
+		if ln == "" {
 			if len(out) == 0 || out[len(out)-1] != "" {
 				out = append(out, "")
 			}
 			continue
 		}
-		if reTrashLine.MatchString(trim) {
+		if reTrashLine.MatchString(ln) {
 			continue
 		}
-		if strings.Contains(trim, "Font Definitions") || strings.Contains(trim, "font-family") || strings.Contains(trim, "{") || strings.Contains(trim, "}") {
-			continue
-		}
-		out = append(out, trim)
+		out = append(out, ln)
 	}
 	for len(out) > 0 && out[0] == "" {
 		out = out[1:]
 	}
-	return strings.Join(out, "\n")
+	if len(out) == 0 {
+		return ""
+	}
+	headings := regexp.MustCompile(`(?i)^(Задача|Входные данные|Входные данные:|Выходные данные|Выходные данные:|Примеры|Примеры входных данных|Примеры:|Примечание|Ограничение времени|Ограничения)$`)
+	var spaced []string
+	for i := 0; i < len(out); i++ {
+		ln := out[i]
+		if headings.MatchString(ln) {
+			if len(spaced) > 0 && spaced[len(spaced)-1] != "" {
+				spaced = append(spaced, "")
+			}
+			spaced = append(spaced, ln)
+			spaced = append(spaced, "")
+		} else {
+			spaced = append(spaced, ln)
+		}
+	}
+	for len(spaced) > 0 && spaced[len(spaced)-1] == "" {
+		spaced = spaced[:len(spaced)-1]
+	}
+	return strings.Join(spaced, "\n")
 }
 
 func wrapLines(s string, width int) string {
