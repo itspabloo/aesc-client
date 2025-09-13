@@ -79,10 +79,11 @@ func main() {
 		fmt.Printf("%s -> %s\n", tasks[i].Name, tasks[i].URL)
 	}
 
-	err = parse.FetchStatement(client, "http://server.aesc.msu.ru", tasks[0].URL, home + "/aesc-statement")
+	statement, err := parse.FetchStatementToString(client, "http://server.aesc.msu.ru" + tasks[0].URL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "FetchStatement failed: %v\n", err)
 		os.Exit(2)
 	}
+	fmt.Println(statement)
 }
 
