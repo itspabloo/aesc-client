@@ -25,11 +25,11 @@ func detectLanguage(filePath string) string {
 	case ".cs":
 		return "mono-cs"
 	case ".java":
-		return "kylix" // на сервере может быть другой компилятор
+		return "kylix"
 	case ".txt":
 		return "txt"
 	default:
-		return "g++0x" // дефолт
+		return "g++0x"
 	}
 }
 
